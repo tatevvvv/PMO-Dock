@@ -390,8 +390,8 @@ def search(args):
 
     # Optional: HTTP DockingVina service URL. If absent, property_computers uses local quickvina.
     vina_url = OmegaConf.select(args, "vina_url", default=None)
-    # Optional: disable the internal ORACLES_APP HTTP wrapper and compute props in-process.
     use_oracles_app = OmegaConf.select(args, "oracle.use_oracles_app", default=False)
+    resume = bool(OmegaConf.select(args.oracle, "resume", default=False))
     oracle = select_oracle(
         reward_type=args.oracle.reward_type,
         task_name=task_name,
@@ -401,8 +401,30 @@ def search(args):
         use_oracles_app=use_oracles_app,
         bench_timer=timer,
         seed=seed,
+        resume=resume,
     )
     pool = Pool(args.genetic.pool_size)
+    if oracle.mol_buffer:
+        pool_entries = []
+        skipped = 0
+        for smiles, props in oracle.mol_buffer.items():
+            try:
+                prop_score = [props.get(name) for name in oracle.computer_names]
+                score = oracle.score_computer(prop_score)
+                pool_entries.append(Entry(smiles=smiles, score=score))
+            except Exception:
+                skipped += 1
+        if pool_entries:
+            pool.add(pool_entries)
+        logger.info(
+            "Resumed %s unique mols from %s (remaining budget %s/%s), pool=%s, skipped_unscorable=%s",
+            len(oracle.mol_buffer),
+            oracle.log_file_path,
+            oracle.max_oracle_calls - len(oracle.mol_buffer),
+            oracle.max_oracle_calls,
+            len(pool),
+            skipped,
+        )
     
     # Track oracle call statistics
     total_oracle_calls = 0
@@ -415,7 +437,7 @@ def search(args):
     while not oracle.finish():
         oracle_calls_trend.append(len(oracle.mol_buffer))
         if len(oracle_calls_trend) > 10:
-            if oracle_calls_trend[-1] - oracle_calls_trend[-5] <= 5:
+            if oracle_calls_trend[-1] == oracle_calls_trend[-10]:
                 logger.info("Stopping: no new molecules generated")
                 break
         num_iter = len(oracle.mol_buffer) // args.genetic.num_prompts
@@ -458,17 +480,27 @@ def search(args):
 
         with timer.phase("gen_post"):
             generated_tokens = all_generated_tokens
-            valid_mols = find_valid_mols(generated_tokens, args.model.mol_tags[0], args.model.mol_tags[1])
-            valid_mols = [canonicalize(mol) for mol in valid_mols]
+            raw_mols = find_valid_mols(generated_tokens, args.model.mol_tags[0], args.model.mol_tags[1])
+            paired_mols = []
+            paired_prompts = []
+            n_invalid = 0
+            for mol, prompt in zip(raw_mols, prompts):
+                canon = canonicalize(mol)
+                if canon:
+                    paired_mols.append(canon)
+                    paired_prompts.append(prompt)
+                else:
+                    n_invalid += 1
+            if n_invalid:
+                logger.info(f"Skipped {n_invalid} invalid/empty generations this round")
 
-        # collect all molecules generated from all prompts
-        mols = []
-        for mol in valid_mols:
-            mols.append(mol)
-        
+        if not paired_mols:
+            logger.info(f"Iter {num_iter}: no valid molecules generated, retrying")
+            continue
+
         # keep only unique molecules
-        unique_mols, unique_inds = np.unique(mols, return_index=True)
-        unique_prompts = np.array(prompts)[unique_inds]
+        unique_mols, unique_inds = np.unique(paired_mols, return_index=True)
+        unique_prompts = np.array(paired_prompts)[unique_inds]
         assert len(unique_prompts) == len(unique_mols)
 
         # keep only the unique molecules and prompts
@@ -496,12 +528,11 @@ def search(args):
         total_wasted_calls += wasted_calls
         
         for mol, score in zip(unique_mols, scores, strict=True):
-            entries.append(
-                Entry(
-                    smiles=mol,
-                    score=score
-                )
-            )
+            try:
+                entries.append(Entry(smiles=mol, score=score))
+            except Exception:
+                logger.warning("Skipping unscorable mol after oracle: %r", mol)
+                continue
 
         # Counts / oracle stats go to the run log only; timing_profile.csv stays time-only (phase seconds).
         logger.info(

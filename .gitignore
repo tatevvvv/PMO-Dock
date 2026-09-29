@@ -38,8 +38,9 @@ tmp/
 *.log
 
 # Large files that shouldn't be pushed to GitHub
-!actives.csv
 *.csv
+!actives.csv
+!benchmark/actives.csv
 *.whl
 *.ckpt
 model.ckpt

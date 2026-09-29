@@ -265,6 +265,13 @@ if __name__ == "__main__":
         default=None,
         help="Optional number of GPUs to round-robin over (default: inferred from CUDA_VISIBLE_DEVICES).",
     )
+    parser.add_argument(
+        "--resume_dir",
+        type=str,
+        required=False,
+        default=None,
+        help="Existing seed log dir (…/lead.<task>/seed-K) or task dir. Reuse 0_mols.csv instead of a new exp.",
+    )
     args = parser.parse_args()
 
     # Validate required arguments
@@ -325,44 +332,63 @@ if __name__ == "__main__":
             len(config_dicts),
         )
     device_counter = 0
+    resume_root = os.path.abspath(args.resume_dir) if args.resume_dir else None
+    if resume_root and not os.path.isdir(resume_root):
+        raise ValueError(f"--resume_dir does not exist: {resume_root}")
+
     for config_dict in config_dicts:
-        # create log dirs
-        task_category = args.task_name[0].split(".")[0]
-        log_dir = get_log_dir(
-            method="genetic",
-            model_name=task_category,
-            exp_name="exp",
-            suffix="-hparam" if args.hparam_config else "",
-        )
+        if resume_root:
+            log_dir = resume_root
+            if os.path.basename(resume_root).startswith("seed-"):
+                log_dir = os.path.dirname(resume_root)
+            if os.path.basename(log_dir).startswith("lead.") or os.path.basename(log_dir).startswith("hit.") or os.path.basename(log_dir).startswith("spec."):
+                log_dir = os.path.dirname(log_dir)
+        else:
+            task_category = args.task_name[0].split(".")[0]
+            log_dir = get_log_dir(
+                method="genetic",
+                model_name=task_category,
+                exp_name="exp",
+                suffix="-hparam" if args.hparam_config else "",
+            )
         os.makedirs(log_dir, exist_ok=True)
 
         for task in args.task_name:
             task_log_dir = os.path.join(log_dir, task)
             os.makedirs(task_log_dir, exist_ok=True)
 
-            # Collect all config paths for this (hparam_combo, task) pair
             for seed in args.seeds:
                 seed_log_dir = os.path.join(task_log_dir, f"seed-{seed}")
+                if resume_root:
+                    base = os.path.basename(resume_root)
+                    if base == f"seed-{seed}":
+                        seed_log_dir = resume_root
+                    elif base.startswith("seed-") and len(args.seeds) == 1:
+                        seed_log_dir = resume_root
+                    elif os.path.isdir(os.path.join(resume_root, f"seed-{seed}")):
+                        seed_log_dir = os.path.join(resume_root, f"seed-{seed}")
+                    elif os.path.isdir(os.path.join(resume_root, task, f"seed-{seed}")):
+                        seed_log_dir = os.path.join(resume_root, task, f"seed-{seed}")
+                    csv_path = os.path.join(seed_log_dir, "0_mols.csv")
+                    if not os.path.isfile(csv_path):
+                        raise FileNotFoundError(f"resume CSV not found: {csv_path}")
                 os.makedirs(seed_log_dir, exist_ok=True)
 
-                # Create a deep copy to avoid modifying the original
                 seed_config_dict = copy.deepcopy(config_dict)
-                
-                # Ensure oracle dict exists
+
                 if "oracle" not in seed_config_dict:
                     seed_config_dict["oracle"] = {}
-                
-                # Update config with run-specific settings
+
                 seed_config_dict["seed"] = seed
                 seed_config_dict["oracle"]["task_name"] = task
                 seed_config_dict["oracle"]["max_calls"] = args.max_oracle_calls
                 seed_config_dict["oracle"]["log_dir"] = seed_log_dir
                 seed_config_dict["oracle"]["reward_type"] = args.reward_type
-                
-                # Set vina_url if provided (run.py sets DOCKING_VINA_URL from config for subprocess workers)
+                if resume_root:
+                    seed_config_dict["oracle"]["resume"] = True
+
                 if args.vina_url is not None:
                     seed_config_dict["vina_url"] = args.vina_url
-                # Device assignment: always round-robin over visible GPUs for each generated config.
                 seed_config_dict["device"] = _round_robin_device(device_counter, n_gpus)
                 device_counter += 1
 

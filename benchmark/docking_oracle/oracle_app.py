@@ -4,10 +4,15 @@
 Flask service for DockingOracle predictions.
 
 Moved under `benchmark/docking_oracle/` so the benchmark owns the oracle.
+
+Served by gunicorn (see ``start_oracle.sh``) or the Flask dev server:
+``python -m benchmark.docking_oracle.oracle_app``.
 """
 
+import os
 import traceback
 import resource
+import threading
 from flask import Flask, request, jsonify
 
 from benchmark.docking_oracle.docking import (
@@ -34,25 +39,44 @@ except Exception as e:
 app = Flask(__name__)
 oracles = {}
 TARGETS = sorted(TARGET_BOX.keys())
+_init_lock = threading.Lock()
+_initialized = False
 
 
 def initialize_oracles(exhaustiveness=None):
-    global oracles
-    if exhaustiveness is not None:
-        print(f"Initializing oracles with exhaustiveness={exhaustiveness}")
-    for target in TARGETS:
-        try:
-            oracles[target] = DockingOracle(target, exhaustiveness)
-            print(f"Initialized {target} oracle")
-        except Exception as e:
-            print(f"Error initializing {target}: {e}")
-            traceback.print_exc()
-    print(f"Oracle service ready: {len(oracles)} targets initialized")
+    global oracles, _initialized
+    with _init_lock:
+        if _initialized and oracles:
+            return
+        if exhaustiveness is not None:
+            print(f"Initializing oracles with exhaustiveness={exhaustiveness}")
+        for target in TARGETS:
+            try:
+                oracles[target] = DockingOracle(target, exhaustiveness)
+                print(f"Initialized {target} oracle")
+            except Exception as e:
+                print(f"Error initializing {target}: {e}")
+                traceback.print_exc()
+        _initialized = True
+        print(f"Oracle service ready: {len(oracles)} targets initialized")
+
+
+def create_app():
+    """WSGI factory / gunicorn preload: initialize receptors then return ``app``."""
+    exhaustiveness = os.environ.get("ORACLE_EXHAUSTIVENESS")
+    initialize_oracles(int(exhaustiveness) if exhaustiveness else None)
+    return app
+
+
+# Gunicorn loads ``benchmark.docking_oracle.oracle_app:app``; init on import.
+if __name__ != "__main__":
+    create_app()
 
 
 @app.route("/health", methods=["GET"])
 def health():
     repeats, agg = antitarget_dock_settings()
+    sample = next(iter(oracles.values()), None)
     return jsonify(
         {
             "status": "healthy",
@@ -60,6 +84,8 @@ def health():
             "antitarget_receptors": sorted(ANTITARGET_RECEPTORS),
             "antitarget_dock_repeats": repeats,
             "antitarget_dock_agg": agg,
+            "num_cpu_dock": None if sample is None else sample.num_cpu_dock,
+            "max_concurrent_docking": DockingOracle._max_concurrent_docking,
             "exhaustiveness_by_target": {
                 t: oracles[t].exhaustiveness for t in sorted(oracles.keys())
             },

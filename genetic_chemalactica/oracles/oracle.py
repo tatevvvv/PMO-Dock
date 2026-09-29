@@ -11,7 +11,6 @@ from rdkit import Chem
 
 from logging_ import logger
 
-
 import os
 from functools import partial
 import math
@@ -30,6 +29,51 @@ from benchmark.rewards import hit_reward, compute_geam_reward
 from genetic_chemalactica.utils.rewards import hit_docking_score_reward, hit_spec_reward
 
 
+def _parse_csv_number(val):
+    if val is None:
+        return None
+    if isinstance(val, (float, np.floating)) and np.isnan(val):
+        return None
+    text = str(val).strip()
+    if text == "" or text.lower() in {"none", "nan"}:
+        return None
+    try:
+        return float(text)
+    except ValueError:
+        return None
+
+
+def load_mol_buffer_from_csv(log_file_path: str, computer_names: List[str], sep: str = ";") -> Dict:
+    """First-seen unique mols from an oracle CSV, with property dicts (no re-docking)."""
+    df = pd.read_csv(log_file_path, sep=sep, dtype=str, on_bad_lines="skip")
+    if df.empty or "mol" not in df.columns:
+        return {}
+
+    col_for = {}
+    for name in computer_names:
+        if name in df.columns:
+            col_for[name] = name
+            continue
+        if name.startswith("SIMILAR"):
+            matches = [c for c in df.columns if str(c).startswith("SIMILAR")]
+            if len(matches) == 1:
+                col_for[name] = matches[0]
+    if len(col_for) != len(computer_names):
+        missing = [n for n in computer_names if n not in col_for]
+        raise ValueError(f"CSV {log_file_path} missing property columns {missing}; have {list(df.columns)}")
+
+    buffer: Dict = {}
+    for _, row in df.iterrows():
+        mol_raw = row.get("mol")
+        if mol_raw is None or (isinstance(mol_raw, float) and np.isnan(mol_raw)):
+            continue
+        mol = str(mol_raw).strip()
+        if not mol or mol.lower() == "nan" or mol in buffer:
+            continue
+        buffer[mol] = {name: _parse_csv_number(row.get(col_for[name])) for name in computer_names}
+    return buffer
+
+
 def select_oracle(
     task_name: str,
     log_dir: str,
@@ -40,6 +84,7 @@ def select_oracle(
     use_oracles_app: bool = False,
     bench_timer: Optional[Any] = None,
     seed: int = 0,
+    resume: bool = False,
 ):
     validate_task_name(task_name)
     reward_type = validate_reward_type(task_name, reward_type)
@@ -95,6 +140,7 @@ def select_oracle(
         vina_url=vina_url,
         bench_timer=bench_timer,
         seed=seed,
+        resume=resume,
     )
 
 
@@ -112,6 +158,7 @@ class DynamicOracle:
         vina_url: str | None = None,
         bench_timer: Optional[Any] = None,
         seed: int = 0,
+        resume: bool = False,
     ):
         self.computer_names = computer_names
         self.log_file_path = log_file_path
@@ -125,13 +172,23 @@ class DynamicOracle:
         if vina_url is not None:
             self.additional_args["vina_url"] = vina_url
         self.additional_args["seed"] = self.seed
-        self.mol_buffer: Dict = {}
-        self.out_file = open(self.log_file_path, "w")
         self.sep = ";"
-        heading = f"mol{self.sep}prompt{self.sep}score{self.sep}{self.sep.join(self.computer_names)}\n"
-        self.out_file.write(heading)
+        self.mol_buffer: Dict = {}
         self.time_spent_on_evaluation = 0.0
         self.vina_url = vina_url
+        heading = f"mol{self.sep}prompt{self.sep}score{self.sep}{self.sep.join(self.computer_names)}\n"
+        can_resume = (
+            resume
+            and os.path.isfile(self.log_file_path)
+            and os.path.getsize(self.log_file_path) > 0
+        )
+        if can_resume:
+            self.mol_buffer = load_mol_buffer_from_csv(self.log_file_path, self.computer_names, sep=self.sep)
+            self.out_file = open(self.log_file_path, "a")
+        else:
+            self.out_file = open(self.log_file_path, "w")
+            self.out_file.write(heading)
+            self.out_file.flush()
 
     def _bench_phase(self, name: str):
         t = self._bench_timer

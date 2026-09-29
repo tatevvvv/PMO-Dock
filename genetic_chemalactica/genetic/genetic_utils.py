@@ -13,7 +13,12 @@ RDLogger.DisableLog("rdApp.*")
 
 
 def get_morgan_fingerprint(mol):
-    return AllChem.GetMorganFingerprintAsBitVect(mol, 2, nBits=2048)
+    if mol is None:
+        return None
+    try:
+        return AllChem.GetMorganFingerprintAsBitVect(mol, 2, nBits=2048)
+    except Exception:
+        return None
 
 
 def get_maccs_fingerprint(mol):
@@ -28,8 +33,16 @@ def tanimoto_dist_func(fing1, fing2, fingerprint: str = "morgan"):
 
 
 def canonicalize(smiles):
-    mol = Chem.MolFromSmiles(smiles)
-    return Chem.MolToSmiles(mol, canonical=True)
+    """Return canonical SMILES, or None if the string is empty or does not parse."""
+    if not smiles or not isinstance(smiles, str):
+        return None
+    try:
+        mol = Chem.MolFromSmiles(smiles)
+        if mol is None:
+            return None
+        return Chem.MolToSmiles(mol, canonical=True)
+    except Exception:
+        return None
 
 
 class Entry:
@@ -41,9 +54,15 @@ class Entry:
         **kwargs
     ):
         self.mol = canonicalize(smiles)
-        self.rdkit_mol = Chem.MolFromSmiles(smiles)
+        if self.mol is None:
+            raise ValueError(f"invalid SMILES for Entry: {smiles!r}")
+        self.rdkit_mol = Chem.MolFromSmiles(self.mol)
+        if self.rdkit_mol is None:
+            raise ValueError(f"RDKit could not re-parse canonical SMILES: {self.mol!r}")
         self.score = score
         self.fingerprint = get_morgan_fingerprint(self.rdkit_mol)
+        if self.fingerprint is None:
+            raise ValueError(f"could not fingerprint mol: {self.mol!r}")
         self.add_props = kwargs
 
     def __eq__(self, other):

@@ -8,7 +8,6 @@ import numpy as np
 from rdkit import Chem, RDLogger
 from rdkit.Chem import AllChem, Crippen, DataStructs, rdMolDescriptors
 from rdkit.Chem.QED import qed
-from rdkit.DataStructs import BulkTanimotoSimilarity
 
 from benchmark.docking_oracle.docking_vina_client import DockingOracleClient
 from benchmark.computers.simulated_properties import quickvina_predictor
@@ -225,6 +224,9 @@ def compute_sas(rdkit_mols, verb: bool = True):
 def compute_fing(rdkit_mols, verb: bool = True):
     fings = []
     for rdkit_mol in rdkit_mols:
+        if rdkit_mol is None:
+            fings.append(None)
+            continue
         try:
             fings.append(AllChem.GetMorganFingerprintAsBitVect(rdkit_mol, 2, nBits=2048))
         except Exception as e:
@@ -234,14 +236,23 @@ def compute_fing(rdkit_mols, verb: bool = True):
     return fings
 
 
+def _tanimoto_or_none(fp, ref_fp):
+    if fp is None or ref_fp is None:
+        return None
+    try:
+        return DataStructs.TanimotoSimilarity(fp, ref_fp)
+    except Exception:
+        return None
+
+
 def compute_similarity(rdkit_mols, rdkit_mol1, verb: bool = True):
     if verb:
         print(f"Computing similarity between {len(rdkit_mols)} generated molecules and {rdkit_mol1} seed molecule.")
     fings = compute_fing(rdkit_mols)
     fing1 = compute_fing([rdkit_mol1])[0]
-    return np.array([DataStructs.TanimotoSimilarity(f, fing1) for f in fings])
+    return np.array([_tanimoto_or_none(f, fing1) for f in fings])
 
 
 def compute_similarity_fing(fings, fing1):
-    return np.array(BulkTanimotoSimilarity(fing1, fings))
+    return np.array([_tanimoto_or_none(f, fing1) for f in fings])
 
