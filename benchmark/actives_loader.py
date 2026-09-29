@@ -35,7 +35,20 @@ def actives_smiles_by_target(path: str | None = None) -> Dict[str, List[str]]:
     return out
 
 
+def reinvent_safe_seed_smiles(smiles: str) -> str:
+    """Map REINVENT-prior unsupported tokens to closest supported forms."""
+    s = smiles
+    for bad, good in (("[N@@H+]", "[NH+]"), ("[N@H+]", "[NH+]")):
+        s = s.replace(bad, good)
+    return s
+
+
 def lead_seed_smiles(target: str, idx: int) -> str:
     """Return lead-task seed SMILES for `target` at index `idx` (from actives.csv)."""
     return actives_smiles_by_target()[target][int(idx)]
+
+
+def lead_seed_smiles_for_reinvent(target: str, idx: int) -> str:
+    """Lead seed SMILES sanitized for REINVENT prior token vocabulary."""
+    return reinvent_safe_seed_smiles(lead_seed_smiles(target, idx))
 

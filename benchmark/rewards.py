@@ -52,3 +52,31 @@ def compute_geam_reward(measured):
     trans_sa_scores = (10 - sa_scores) / 9
     aggregated_scores = (np.clip(docking_scores, 0, 20) / 20) * qed_scores * trans_sa_scores
     return aggregated_scores
+
+
+def hit_docking_score_reward(measured, sigmas, hit_ranges):
+    """Lead-style: (dock/20) * hit_reward(remaining props with ranges)."""
+    if measured[0] is None or any(m is None for m in measured[1:]):
+        # Allow None only in docking? No — any missing prop → 0 reward.
+        if measured[0] is None:
+            return 0.0
+        # None in constraint props → hit_reward already maps None→0
+    docking_score = measured[0]
+    computed = hit_reward(measured[1:], sigmas[1:], hit_ranges[1:])
+    return float(docking_score) / 20.0 * float(computed)
+
+
+def hit_spec_reward(measured, sigmas, hit_ranges):
+    """Spec-style: gap(target, antitarget) * hit_reward(all four props)."""
+    assert len(measured) == 4
+    if any(m is None for m in measured):
+        return 0.0
+    target_docking_score = measured[0]
+    antitarget_docking_score = measured[1]
+    gap = np.clip(
+        float(target_docking_score) / 20.0 - float(antitarget_docking_score) / 20.0,
+        0.0,
+        1.0,
+    )
+    computed = hit_reward(measured, sigmas, hit_ranges)
+    return float(gap) * float(computed)

@@ -80,6 +80,10 @@ def run_hit(cfg_path):
     
     env = os.environ.copy()
     env["PYTHONUNBUFFERED"] = "1"
+    # Pin each child to one physical GPU (runner always uses cuda:0 inside the process).
+    gpu_id = cfg.get("gpu_id")
+    if gpu_id is not None and str(gpu_id).strip() != "":
+        env["CUDA_VISIBLE_DEVICES"] = str(gpu_id)
 
     multi_obj_dir = os.path.join(os.environ["PROJECT_ROOT"], "genetic_gfn", "multi_objective")
     # Log stdout/stderr to per-run files so users don't need to scan terminal output.
@@ -93,10 +97,12 @@ def run_hit(cfg_path):
 
     with open(stdout_path, "w", buffering=1) as stdout_f, open(stderr_path, "w", buffering=1) as stderr_f:
         stdout_f.write(f"CWD: {multi_obj_dir}\n")
-        stdout_f.write(f"CUDA_VISIBLE_DEVICES={os.environ.get('CUDA_VISIBLE_DEVICES','')}\n")
+        stdout_f.write(f"CUDA_VISIBLE_DEVICES={env.get('CUDA_VISIBLE_DEVICES','')}\n")
         stdout_f.write("CMD: " + " ".join(gfn_hit_command) + "\n\n")
         stdout_f.flush()
 
+        # Prefer the env interpreter so we don't accidentally use system python3.
+        gfn_hit_command[0] = sys.executable
         gfn_hit_process = subprocess.Popen(
             gfn_hit_command,
             env=env,
@@ -240,6 +246,21 @@ if __name__ == "__main__":
         help="Maximum parallel subprocesses (GPU from SLURM / environment; each run uses cuda:0).",
     )
     parser.add_argument(
+        "--anti_targets",
+        nargs="+",
+        required=False,
+        default=None,
+        help="If set with --targets 6nzp, only these antitargets are run (default: all configured).",
+    )
+    parser.add_argument(
+        "--gpu_ids",
+        nargs="+",
+        type=int,
+        required=False,
+        default=None,
+        help="Physical GPU ids to round-robin across parallel runs (sets CUDA_VISIBLE_DEVICES per child).",
+    )
+    parser.add_argument(
         "--search_range",
         type=int,
         nargs="+",
@@ -251,6 +272,10 @@ if __name__ == "__main__":
     targets = args.targets if args.targets else args.oracle_name
     if not targets:
         raise ValueError("--targets is required")
+    if args.anti_targets:
+        for t in targets:
+            if str(t) in TARGET_TO_ANTI_TARGETS:
+                TARGET_TO_ANTI_TARGETS[str(t)] = list(args.anti_targets)
 
     # Setup logging
     logging.basicConfig(
@@ -278,6 +303,8 @@ if __name__ == "__main__":
 
     
     all_cfg_paths = []
+    gpu_ids = list(args.gpu_ids) if args.gpu_ids else [0]
+    job_idx = 0
 
     if args.search_range is not None:
         config_dicts = config_dicts[args.search_range[0]:args.search_range[1]]
@@ -333,7 +360,9 @@ if __name__ == "__main__":
                         # CPU parallelism for GA ops (joblib pool); passed through to run.py.
                         "n_jobs": int(args.n_jobs) if args.n_jobs is not None else -1,
                         "device": "cuda:0",
+                        "gpu_id": int(gpu_ids[job_idx % len(gpu_ids)]),
                     }
+                    job_idx += 1
 
                     cfg_file = os.path.join(seed_log_dir, "run_config.yaml")
                     with open(cfg_file, "w") as f:
